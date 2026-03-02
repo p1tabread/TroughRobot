@@ -24,7 +24,7 @@ async def set_motor_current(current: float):
     """
     data = float2bytesMSB(current)
     await bus.write_block(I2C_ADDR, STM32DriverRegs.MOTOR_CURRENT, data)
-    #print(f"Sent motor current data: {[hex(i) for i in data]}")
+    print(f"Sent motor current data: {[hex(i) for i in data]}")
 
 async def read_motor_current() -> float:
     """Read motor current setpoint as a float encoded as 4 bytes MSB"""

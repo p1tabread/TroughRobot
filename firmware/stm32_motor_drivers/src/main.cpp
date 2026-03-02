@@ -413,8 +413,8 @@ void loop() {
 
   // Run the FOC loop commands
   motor.loopFOC();
-  //motor.move(target_current);
-  motor.move();
+  motor.move(target_current);
+  //motor.move();
 
 
   // --------------------------------------------------------- //
@@ -449,11 +449,11 @@ void receiveEvent(int howMany) {
         target_current = bytes2floatMSB(buffer);
         Serial.println("Received MOTOR_CURRENT: " + String(target_current, 3));
         break;
-      case REG_LED:
-          digitalWrite(LED_BUILTIN, buffer[0]);
+    //   case REG_LED:
+    //       digitalWrite(LED_BUILTIN, buffer[0]);
 
-          Serial.printf("LED %s\n", buffer[0] ? "ON" : "OFF");
-          break;
+    //       Serial.printf("LED %s\n", buffer[0] ? "ON" : "OFF");
+    //       break;
     }
   }
 }
