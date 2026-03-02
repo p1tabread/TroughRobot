@@ -45,6 +45,16 @@ async def read_velocity() -> float:
 async def read_status() -> int:
     return await bus.read_byte(I2C_ADDR, STM32DriverRegs.STATUS)
 
+async def start_foc() -> int:
+    """
+    Send a write request to start FOC. The STM32 will respond with 0x00 if it started successfully, or 0x01 if it was already started.
+    """
+    await bus.write_byte(I2C_ADDR, STM32DriverRegs.STARTFOC, 0x01)
+    await asyncio.sleep(0.1)  # give STM32 time to prepare response
+    response = await bus.read_byte(I2C_ADDR, STM32DriverRegs.STARTFOC)
+    return response
+
+
 async def poll_loop():
     interval = 1.0 / POLL_RATE
     while True:

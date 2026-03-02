@@ -59,6 +59,8 @@ float PSU_voltage = 12.0;
 
 char serialBuff[32];
 
+bool FOC_started = false;
+
 volatile uint8_t currentRegister = 0;
 volatile bool registerSet = false;
 
@@ -352,7 +354,7 @@ void setup() {
 
     setupFOC();
 
-    startFOC();
+    //startFOC();
 
     //target_current = 0.1;
 }
@@ -449,6 +451,20 @@ void receiveEvent(int howMany) {
         target_current = bytes2floatMSB(buffer);
         Serial.println("Received MOTOR_CURRENT: " + String(target_current, 3));
         break;
+
+      case REG_STARTFOC:
+        if (buffer[0] == 0x01) {
+          if (!FOC_started) {
+            startFOC();
+            FOC_started = true;
+            Serial.println("FOC started.");
+          } else {
+            Serial.println("FOC already started.");
+          }
+        } else {
+          Serial.println("Invalid value for STARTFOC. Use 0x01 to start.");
+        }
+        break;
     //   case REG_LED:
     //       digitalWrite(LED_BUILTIN, buffer[0]);
 
@@ -489,6 +505,14 @@ void requestEvent() {
       Wire.write(data, 4);
       break;
     }
+
+    case REG_STARTFOC:
+      if (FOC_started) {
+        Wire.write(0x01);  // FOC started
+      } else {
+        Wire.write(0x00);  // Not started
+      }
+      break;
       
     default:
       Wire.write("???");

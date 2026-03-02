@@ -14,6 +14,7 @@ class Addresses:
 class STM32DriverRegs:
     MOTOR_CURRENT     = 0x01 # write - float 4 bytes MSB
     ENCODER_VELOCITY  = 0x02 # read  - float 4 bytes MSB
+    STARTFOC          = 0x03 # read request - starts FOC, returns 0x00 if started successfully, 0x01 if already started
     STATUS            = 0x05 # read  - single byte
 
 class PollRates:
