@@ -24,7 +24,7 @@ async def main():
     #     new_current = left_driver_data["motor_current"]
     #     print(f"Current: {current}A | Velocity: {velocity:.3f} rad/s | Read back: {new_current:.3f}A")
 
-    await set_motor_current(-0.5)
+    await set_motor_current(-1.0)
     await asyncio.sleep(0.5)
 
     velocity = left_driver_data["velocity"]
@@ -33,7 +33,7 @@ async def main():
 
     # Print velocity continuously for 5 seconds
     start_time = asyncio.get_event_loop().time()
-    while asyncio.get_event_loop().time() - start_time < 5:
+    while asyncio.get_event_loop().time() - start_time < 3:
         velocity = left_driver_data["velocity"]
         print(f"Velocity: {velocity:.3f} rad/s")
         await asyncio.sleep(0.1)  # adjust print rate here
