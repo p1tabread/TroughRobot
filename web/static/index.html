@@ -1,13 +1,101 @@
 <!DOCTYPE html>
-<html>
-  <head>
-    <meta charset="utf-8">
-    <title>Raspberry Pi 5 site</title>
-    <link rel="stylesheet" href="/static/styles.css">
-  </head>
-  <body>
-    <h1>Hello from Raspberry Pi 5</h1>
-    <div id="message"></div>
-    <script src="/static/app.js"></script>
-  </body>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Slider WebSocket Demo</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            margin: 2rem;
+        }
+        .slider-container {
+            margin-bottom: 1.5rem;
+        }
+        .value {
+            font-weight: bold;
+            margin-left: 0.5rem;
+        }
+        #server-message {
+            margin-top: 2rem;
+            padding: 1rem;
+            border: 1px solid #ccc;
+            background: #f7f7f7;
+        }
+    </style>
+</head>
+<body>
+    <h1>Randomizer API Sliders</h1>
+
+    <div class="slider-container">
+        <label for="slider1">Slider 1:</label>
+        <input type="range" id="slider1" min="0" max="2.5" value="0" step="0.1">
+        <span id="slider1-value" class="value">0</span>
+    </div>
+
+    <div class="slider-container">
+        <label for="slider2">Slider 2:</label>
+        <input type="range" id="slider2" min="0" max="2.5" value="0" step="0.1">
+        <span id="slider2-value" class="value">0</span>
+    </div>
+
+    <div id="server-message">Waiting for server updates…</div>
+
+    <script>
+        const slider1 = document.getElementById("slider1");
+        const slider2 = document.getElementById("slider2");
+        const slider1Value = document.getElementById("slider1-value");
+        const slider2Value = document.getElementById("slider2-value");
+        const serverMessage = document.getElementById("server-message");
+
+        // Update displayed numbers next to sliders
+        function updateLabels() {
+            slider1Value.textContent = slider1.value;
+            slider2Value.textContent = slider2.value;
+        }
+
+        slider1.addEventListener("input", () => {
+            updateLabels();
+            sendValues();
+        });
+
+        slider2.addEventListener("input", () => {
+            updateLabels();
+            sendValues();
+        });
+
+        // Open WebSocket connection to the backend
+        const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+        const ws = new WebSocket(`${protocol}://${window.location.host}/ws`);
+
+        ws.onopen = () => {
+            sendValues();
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            serverMessage.textContent =
+                `${data.message}: slider1=${data.slider1}, slider2=${data.slider2}`;
+        };
+
+        ws.onclose = () => {
+            serverMessage.textContent = "WebSocket connection closed";
+        };
+
+        ws.onerror = () => {
+            serverMessage.textContent = "WebSocket error occurred";
+        };
+
+        function sendValues() {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    slider1: Number(slider1.value),
+                    slider2: Number(slider2.value)
+                }));
+            }
+        }
+
+        // Initial labels
+        updateLabels();
+    </script>
+</body>
 </html>
