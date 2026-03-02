@@ -6,35 +6,78 @@
     <style>
         body {
             font-family: sans-serif;
-            margin: 2rem;
+            margin: 1.5rem;
         }
+
         .slider-container {
-            margin-bottom: 1.5rem;
+            margin-bottom: 2rem;
         }
+
+        input[type="range"] {
+            -webkit-appearance: none; /* let us fully style it on iOS Safari */
+            appearance: none;
+            width: 100%;              /* full width of the screen */
+            max-width: 500px;         /* optional, keeps it tidy on desktop */
+            height: 32px;             /* larger touch area */
+            background: transparent;
+        }
+
+        /* Track - WebKit (Safari / Chrome on iOS) */
+        input[type="range"]::-webkit-slider-runnable-track {
+            height: 12px;              /* thicker track for touch */
+            background: #ddd;
+            border-radius: 6px;
+        }
+
+        /* Thumb - WebKit */
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 32px;               /* larger thumb */
+            height: 32px;
+            border-radius: 50%;
+            background: #007aff;       /* iOS blue style */
+            border: 2px solid #fff;
+            box-shadow: 0 0 4px rgba(0, 0, 0, 0.3);
+            margin-top: -10px;         /* centre the thumb on 12px track [web:90] */
+        }
+
+        /* Firefox track */
+        input[type="range"]::-moz-range-track {
+            height: 12px;
+            background: #ddd;
+            border-radius: 6px;
+        }
+
+        /* Firefox thumb */
+        input[type="range"]::-moz-range-thumb {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: #007aff;
+            border: 2px solid #fff;
+            box-shadow: 0 0 4px rgba(0, 0, 0, 0.3);
+        }
+
         .value {
-            font-weight: bold;
-            margin-left: 0.5rem;
-        }
-        #server-message {
-            margin-top: 2rem;
-            padding: 1rem;
-            border: 1px solid #ccc;
-            background: #f7f7f7;
+            font-size: 1.4rem;         /* easier to read */
+            margin-left: 0.75rem;
         }
     </style>
+
 </head>
 <body>
     <h1>Randomizer API Sliders</h1>
 
     <div class="slider-container">
         <label for="slider1">Slider 1:</label>
-        <input type="range" id="slider1" min="0" max="2.5" value="0" step="0.1">
+        <input type="range" id="slider1" min="-2.5" max="2.5" value="0" step="0.1">
         <span id="slider1-value" class="value">0</span>
     </div>
 
     <div class="slider-container">
         <label for="slider2">Slider 2:</label>
-        <input type="range" id="slider2" min="0" max="2.5" value="0" step="0.1">
+        <input type="range" id="slider2" min="-2.5" max="2.5" value="0" step="0.1">
         <span id="slider2-value" class="value">0</span>
     </div>
 
@@ -48,32 +91,45 @@
     const serverMessage = document.getElementById("server-message");
 
     function updateLabels() {
-        slider1Value.textContent = slider1.value;
-        slider2Value.textContent = slider2.value;
+        slider1Value.textContent = Number(slider1.value).toFixed(1);
+        slider2Value.textContent = Number(slider2.value).toFixed(1);
+    }
+
+    // Your helper (not strictly required, but kept since you provided it)
+    function float2bytesMSB(val) {
+        const buffer = new ArrayBuffer(4);
+        const view = new DataView(buffer);
+        view.setFloat32(0, val, false); // big-endian [web:49]
+        const bytes = [
+            view.getUint8(0),
+            view.getUint8(1),
+            view.getUint8(2),
+            view.getUint8(3)
+        ];
+        return bytes;
     }
 
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${protocol}://${window.location.host}/ws`);
-
-    // Tell the browser we expect binary data as ArrayBuffer
-    ws.binaryType = "arraybuffer";  // so event.data is an ArrayBuffer for binary messages [web:12][web:20]
+    ws.binaryType = "arraybuffer"; // receive binary as ArrayBuffer [web:49]
 
     ws.onopen = () => {
         console.log("WebSocket opened");
         serverMessage.textContent = "WebSocket connected";
-        sendValues();  // send initial values
     };
 
     ws.onmessage = (event) => {
         if (event.data instanceof ArrayBuffer) {
             const buffer = event.data;
             const view = new DataView(buffer);
-            const slider1Val = view.getInt32(0, false); // big-endian
-            const slider2Val = view.getInt32(4, false); // big-endian
+
+            // Two float32 values, big-endian
+            const v1 = view.getFloat32(0, false); // offset 0 [web:49]
+            const v2 = view.getFloat32(4, false); // offset 4
 
             serverMessage.textContent =
-                `Binary reply: slider1=${slider1Val}, slider2=${slider2Val}`;
-            console.log("Received binary:", slider1Val, slider2Val);
+                `Reply: slider1=${v1.toFixed(3)}, slider2=${v2.toFixed(3)}`;
+            console.log("Received float32:", v1, v2);
         } else {
             console.log("Unexpected non-binary message:", event.data);
         }
@@ -91,34 +147,28 @@
 
     function sendValues() {
         if (ws.readyState !== WebSocket.OPEN) {
-            console.log("WebSocket not open, readyState =", ws.readyState);
             return;
         }
 
-        const s1 = Number(slider1.value);
-        const s2 = Number(slider2.value);
+        const v1 = Number(slider1.value);
+        const v2 = Number(slider2.value);
 
-        // 8‑byte buffer: 2 x 32‑bit signed ints, big-endian to match Python struct("!ii")
+        // Pack two float32 values (big-endian) into 8 bytes
         const buffer = new ArrayBuffer(8);
         const view = new DataView(buffer);
-        view.setInt32(0, s1, false); // big-endian
-        view.setInt32(4, s2, false); // big-endian
+        view.setFloat32(0, v1, false); // big-endian [web:49]
+        view.setFloat32(4, v2, false);
 
-        console.log("Sending binary:", s1, s2);
         ws.send(buffer);
     }
 
-    slider1.addEventListener("input", () => {
-        updateLabels();
-        sendValues();
-    });
-
-    slider2.addEventListener("input", () => {
-        updateLabels();
-        sendValues();
-    });
+    slider1.addEventListener("input", updateLabels);
+    slider2.addEventListener("input", updateLabels);
 
     updateLabels();
+
+    // Send current slider values every 0.1 seconds, regardless of movement
+    setInterval(sendValues, 100);
 </script>
 
 </body>
