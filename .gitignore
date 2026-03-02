@@ -219,5 +219,5 @@ __marimo__/
 firmware/stm32_motor_drivers/.pio/
 firmware/stm32_motor_drivers/.pioenvs/
 firmware/stm32_motor_drivers/.vscode/
-hardware/__pycache__/motor_driver_left.cpython-313.pyc
-hardware/__pycache__/motor_driver_right.cpython-313.pyc
+
+hardware/__pycache__/
