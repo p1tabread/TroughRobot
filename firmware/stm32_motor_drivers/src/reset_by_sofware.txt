@@ -1,0 +1,28 @@
+#include <Arduino.h>
+#include "stm32g4xx_hal.h"    // needed for HAL_DeInit
+
+void setup() {
+    pinMode(PB12, INPUT);
+    
+    pinMode(PC6, OUTPUT);
+
+    digitalWrite(PC6, LOW);
+    delay(5000);
+}
+
+bool ledState = false;
+bool prevLoopBtnState = HIGH;
+
+void loop() {
+    if (digitalRead(PB12) == LOW && prevLoopBtnState == HIGH) {
+        // ledState = !ledState;
+        // digitalWrite(PC6, ledState);
+        // delay(200);
+        NVIC_SystemReset();
+    }
+    prevLoopBtnState = digitalRead(PB12);
+
+    ledState = !ledState;
+    digitalWrite(PC6, ledState);
+    delay(200);
+}

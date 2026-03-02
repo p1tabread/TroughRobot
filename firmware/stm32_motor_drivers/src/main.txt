@@ -1,0 +1,572 @@
+#include <Arduino.h>
+#include "stm32g4xx_hal.h"    // needed for HAL_DeInit
+
+#include <ACANFD_STM32.h>
+
+#include <SPI.h>
+
+#include <SimpleFOC.h>
+#include <SimpleFOCDrivers.h>
+
+#include "encoders/as5048a/MagneticSensorAS5048A.h"
+#include "drivers/drv8316/drv8316.h"
+#include "utilities/stm32math/STM32G4CORDICTrigFunctions.h"
+
+#define POLE_PAIRS 7
+
+// Left motor
+// #define CAN_ADDR    0x001
+// #define SHAFT_VEL_ADDR    0x7FE
+
+//Right motor
+#define CAN_ADDR    0x002
+#define SHAFT_VEL_ADDR    0x7FF
+
+#define LED_BUILTIN PC6
+
+#define USER_BTN   PB12
+
+#define SPI1_SCK   PA5
+#define SPI1_MISO  PA6   
+#define SPI1_MOSI  PA7
+#define DRV_CS     PA4 
+#define ENC_CS     PC4
+
+#define CAN_EN  PC10
+
+#define PHA_H   PA10
+#define PHA_L   PB15
+
+#define PHB_H   PA9
+#define PHB_L   PB14
+
+#define PHC_H   PA8
+#define PHC_L   PB13
+
+#define SO_A    PA0
+#define SO_B    PA1
+#define SO_C    PA2
+
+
+SPIClass SPI_1(SPI1_MOSI, SPI1_MISO, SPI1_SCK);
+
+BLDCMotor motor = BLDCMotor(POLE_PAIRS);
+
+//  BLDCDriver6PWM( int phA_h, int phA_l, int phB_h, int phB_l, int phC_h, int phC_l, int en)
+//  - phA_h, phA_l - A phase pwm pin high/low pair 
+//  - phB_h, phB_l - B phase pwm pin high/low pair
+//  - phB_h, phC_l - C phase pwm pin high/low pair
+DRV8316Driver6PWM driver = DRV8316Driver6PWM(PHA_H, PHA_L, PHB_H, PHB_L, PHC_H, PHC_L, DRV_CS, false);
+
+LowsideCurrentSense current_sense  = LowsideCurrentSense(600.0,  SO_A, SO_B, SO_C);
+
+MagneticSensorAS5048A sensor(ENC_CS, false, SPISettings(5'000'000, MSBFIRST, SPI_MODE1));
+
+float target_current = 0;
+
+float voltage_limit = 10;  // driver voltage limit
+float PSU_voltage = 12.0;
+
+void rebootToDFU() {
+    __disable_irq();
+
+    // Stop SysTick
+    SysTick->CTRL = 0;
+
+    // Deinit HAL (shuts down peripherals & interrupts)
+    HAL_RCC_DeInit();
+    HAL_DeInit();
+
+    // ---- Disable USB (STM32G431 version) ----
+
+    // Disable USB clock
+    RCC->APB1ENR1 &= ~RCC_APB1ENR1_USBEN;
+
+    // Reset USB peripheral
+    RCC->APB1RSTR1 |=  RCC_APB1RSTR1_USBRST;
+    RCC->APB1RSTR1 &= ~RCC_APB1RSTR1_USBRST;
+
+    // Reset USB pins PA11/PA12 to analog
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = GPIO_PIN_11 | GPIO_PIN_12;
+    GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+    // Remap system memory to 0x00000000
+    SYSCFG->MEMRMP = SYSCFG_MEMRMP_MEM_MODE_0;
+
+    // System memory bootloader start
+    uint32_t bootAddr = 0x1FFF0000;
+
+    // Load stack pointer and reset vector
+    uint32_t sp = *(__IO uint32_t*)(bootAddr);
+    uint32_t rv = *(__IO uint32_t*)(bootAddr + 4);
+
+    // Set main stack pointer
+    __set_MSP(sp);
+
+    // Jump to bootloader
+    ((void (*)(void))rv)();
+}
+
+void float2bytesMSB(float val, uint8_t *bytes) {
+    // Copy the raw bits of val into an integer so can perform
+    // bitwise operations
+    uint32_t valAsInt;
+    memcpy(&valAsInt, &val, sizeof(float));
+
+    // Extract the bytes in big-endian (MSB-first) order
+    bytes[0] = (valAsInt >> 24) & 0xFF;
+    bytes[1] = (valAsInt >> 16) & 0xFF;
+    bytes[2] = (valAsInt >> 8)  & 0xFF;
+    bytes[3] = (valAsInt >> 0)  & 0xFF;
+}
+
+float bytes2floatMSB(const uint8_t *bytes) {
+    // Readt the bytes in big-endian (MSB-first) order
+    uint32_t valAsInt = 
+        ((uint32_t)bytes[0] << 24) |
+        ((uint32_t)bytes[1] << 16) |
+        ((uint32_t)bytes[2] << 8)  |
+        ((uint32_t)bytes[3]);
+
+    // Copy the raw bits to a float and return
+    float val;
+    memcpy(&val, &valAsInt, sizeof(float));
+
+    return val;
+}
+
+void printDRV8316Status() {
+  DRV8316Status status = driver.getStatus();
+	Serial.println("DRV8316 Status:");
+	Serial.print("Fault: ");
+	Serial.println(status.isFault());
+	Serial.print("Buck Error: ");
+	Serial.print(status.isBuckError());
+	Serial.print("  Undervoltage: ");
+	Serial.print(status.isBuckUnderVoltage());
+	Serial.print("  OverCurrent: ");
+	Serial.println(status.isBuckOverCurrent());
+	Serial.print("Charge Pump UnderVoltage: ");
+	Serial.println(status.isChargePumpUnderVoltage());
+	Serial.print("OTP Error: ");
+	Serial.println(status.isOneTimeProgrammingError());
+	Serial.print("OverCurrent: ");
+	Serial.print(status.isOverCurrent());
+	Serial.print("  Ah: ");
+	Serial.print(status.isOverCurrent_Ah());
+	Serial.print("  Al: ");
+	Serial.print(status.isOverCurrent_Al());
+	Serial.print("  Bh: ");
+	Serial.print(status.isOverCurrent_Bh());
+	Serial.print("  Bl: ");
+	Serial.print(status.isOverCurrent_Bl());
+	Serial.print("  Ch: ");
+	Serial.print(status.isOverCurrent_Ch());
+	Serial.print("  Cl: ");
+	Serial.println(status.isOverCurrent_Cl());
+	Serial.print("OverTemperature: ");
+	Serial.print(status.isOverTemperature());
+	Serial.print("  Shutdown: ");
+	Serial.print(status.isOverTemperatureShutdown());
+	Serial.print("  Warning: ");
+	Serial.println(status.isOverTemperatureWarning());
+	Serial.print("OverVoltage: ");
+	Serial.println(status.isOverVoltage());
+	Serial.print("PowerOnReset: ");
+	Serial.println(status.isPowerOnReset());
+	Serial.print("SPI Error: ");
+	Serial.print(status.isSPIError());
+	Serial.print("  Address: ");
+	Serial.print(status.isSPIAddressError());
+	Serial.print("  Clock: ");
+	Serial.print(status.isSPIClockFramingError());
+	Serial.print("  Parity: ");
+	Serial.println(status.isSPIParityError());
+	if (status.isFault())
+		driver.clearFault();
+	delayMicroseconds(1); // ensure 400ns delay
+	DRV8316_PWMMode val = driver.getPWMMode();
+	Serial.print("PWM Mode: ");
+	Serial.println(val);
+	delayMicroseconds(1); // ensure 400ns delay
+	bool lock = driver.isRegistersLocked();
+	Serial.print("Lock: ");
+	Serial.println(lock);
+}
+
+void setupFOC() {
+    // initialise magnetic sensor hardware
+    sensor.init(&SPI_1);
+    // link the motor to the sensor
+    motor.linkSensor(&sensor);
+
+    driver.voltage_power_supply = PSU_voltage;
+    driver.voltage_limit = voltage_limit;
+
+    driver.init(&SPI_1);
+
+    // small delay to allow SPI response
+    delay(10);
+
+    // Set the buck output tot 5V
+    driver.setBuckVoltage(VB_5V);
+    // Wait some time for everything to stabilise
+    delay(500);
+
+    // It's advised to have at least 400ns between read and write calls
+    driver.setOCPLevel(Curr_16A);
+    delayMicroseconds(1);
+    driver.setOCPMode(AutoRetry_Fault);
+    delayMicroseconds(1);
+    driver.setOCPRetryTime(Retry500ms);
+    delayMicroseconds(1);
+    driver.setSlew(Slew_200Vus);
+    delayMicroseconds(1);
+    driver.setPWM100Frequency(FREQ_20KHz);
+    delayMicroseconds(1);
+    //driver.setCurrentSenseGain(Gain_0V15); // Set the current sense gain to 150 mV/A
+    driver.setCurrentSenseGain(Gain_0V25); // Set the current sense gain to 600 mV/A
+    //driver.setCurrentSenseGain(Gain_0V375); // Set the current sense gain to 1200 mV/A
+    delayMicroseconds(1);
+    // Serial.print("Current gain:");
+    // Serial.println("here 1");
+    // Serial.println(driver.getCurrentSenseGain()); 
+    // Serial.println("here 2");
+    // delayMicroseconds(1);
+    //driver.setPWMMode(PWM6_Mode);
+    driver.setPWMMode(PWM6_Mode);
+    delayMicroseconds(1);
+
+    Serial.println("Init complete...");
+
+    delay(100);
+    printDRV8316Status();
+
+
+    motor.current_limit = 2.0;   // [Amps]
+
+    current_sense.linkDriver(&driver);
+
+    // Link driver to the motor
+    motor.linkDriver(&driver);
+
+    // aligning voltage 
+    motor.voltage_sensor_align = 3;
+    // choose FOC modulation 
+    motor.foc_modulation = FOCModulationType::SinePWM;
+
+    motor.torque_controller = TorqueControlType::foc_current;
+    //motor.torque_controller = TorqueControlType::voltage;
+    
+    // // // set motion control loop to be used
+    motor.controller = MotionControlType::torque;
+
+    
+    // // comment out if not needed
+    motor.useMonitoring(Serial);
+
+}
+
+void startFOC() {
+    // initialize motor
+    motor.init();
+
+    if (current_sense.init())  Serial.println("Current sense init success!");
+    else{
+        Serial.println("Current sense init failed!");
+        return;
+    }
+      // link the current sense to the motor
+    motor.linkCurrentSense(&current_sense);
+
+
+     // align encoder and start FOC
+    motor.initFOC();
+
+
+    // add target command T
+    // command.add('T', doTarget, "target voltage");
+
+    Serial.println(F("Motor ready."));
+    // Serial.println(F("Set the target voltage: - command T"));
+
+    //enabled = true;
+    
+    _delay(1000);
+}
+
+void setup() {
+    
+  pinMode(LED_BUILTIN, OUTPUT);
+
+    pinMode(USER_BTN, INPUT);
+
+    pinMode(CAN_EN, OUTPUT);
+    digitalWrite(CAN_EN, HIGH); // Enable the CAN transceiver
+
+    pinMode(DRV_CS, OUTPUT);
+    pinMode(ENC_CS, OUTPUT);
+
+    pinMode(SO_A, INPUT);
+    pinMode(SO_B, INPUT);
+    pinMode(SO_C, INPUT);
+
+    SimpleFOCDebug::enable(&Serial);
+
+    SimpleFOC_CORDIC_Config();
+
+    Serial.begin(115200);
+
+    // while (!Serial) {
+    //     digitalWrite (LED_BUILTIN, !digitalRead (LED_BUILTIN)) ;
+    //     delay (50) ;
+    // }
+
+    delay(2000);
+
+  // uint32_t sysclk = HAL_RCC_GetSysClockFreq();
+  // uint32_t hclk   = HAL_RCC_GetHCLKFreq();
+  // uint32_t pclk1  = HAL_RCC_GetPCLK1Freq();
+  // uint32_t pclk2  = HAL_RCC_GetPCLK2Freq();
+
+  // Serial.println("Clock configuration:");
+  // Serial.print("SYSCLK: "); Serial.println(sysclk);
+  // Serial.print("HCLK:   "); Serial.println(hclk);
+  // Serial.print("PCLK1:  "); Serial.println(pclk1);
+  // Serial.print("PCLK2:  "); Serial.println(pclk2);
+
+  // uint32_t src = __HAL_RCC_GET_SYSCLK_SOURCE();
+  // if (src == RCC_SYSCLKSOURCE_STATUS_HSE)
+  //   Serial.println("System clock source: HSE");
+  // else if (src == RCC_SYSCLKSOURCE_STATUS_HSI)
+  //   Serial.println("System clock source: HSI");
+  // else if (src == RCC_SYSCLKSOURCE_STATUS_PLLCLK)
+  //   Serial.println("System clock source: PLL");
+
+  // uint32_t pllSource = __HAL_RCC_GET_PLL_OSCSOURCE();
+  // if (pllSource == RCC_PLLSOURCE_HSE) {
+  //   Serial.println("PLL source: HSE (external crystal)");
+  // } else if (pllSource == RCC_PLLSOURCE_HSI) {
+  //   Serial.println("PLL source: HSI (internal RC)");
+  // }
+
+  //ACANFD_STM32_Settings settings (500 * 1000, DataBitRateFactor::x5) ;
+  //ACANFD_STM32_Settings settings (500 * 1000, DataBitRateFactor::x2) ;
+  //ACANFD_STM32_Settings settings (1000 * 1000, DataBitRateFactor::x3) ;
+
+  ACANFD_STM32_Settings settings (1000 * 1000, 80, DataBitRateFactor::x5, 75) ;
+  //ACANFD_STM32_Settings settings (1000 * 1000, 80, DataBitRateFactor::x5, 80) ;
+
+  Serial.print ("Bit Rate prescaler: ") ;
+  Serial.println (settings.mBitRatePrescaler) ;
+  Serial.print ("Arbitration Phase segment 1: ") ;
+  Serial.println (settings.mArbitrationPhaseSegment1) ;
+  Serial.print ("Arbitration Phase segment 2: ") ;
+  Serial.println (settings.mArbitrationPhaseSegment2) ;
+  Serial.print ("Arbitration SJW: ") ;
+  Serial.println (settings.mArbitrationSJW) ;
+  Serial.print ("Actual Arbitration Bit Rate: ") ;
+  Serial.print (settings.actualArbitrationBitRate ()) ;
+  Serial.println (" bit/s") ;
+  Serial.print ("Arbitration sample point: ") ;
+  Serial.print (settings.arbitrationSamplePointFromBitStart ()) ;
+  Serial.println ("%") ;
+  Serial.print ("Exact Arbitration Bit Rate ? ") ;
+  Serial.println (settings.exactArbitrationBitRate () ? "yes" : "no") ;
+  Serial.print ("Data Phase segment 1: ") ;
+  Serial.println (settings.mDataPhaseSegment1) ;
+  Serial.print ("Data Phase segment 2: ") ;
+  Serial.println (settings.mDataPhaseSegment2) ;
+  Serial.print ("Data SJW: ") ;
+  Serial.println (settings.mDataSJW) ;
+  Serial.print ("Actual Data Bit Rate: ") ;
+  Serial.print (settings.actualDataBitRate ()) ;
+  Serial.println (" bit/s") ;
+  Serial.print ("Data sample point: ") ;
+  Serial.print (settings.dataSamplePointFromBitStart ()) ;
+  Serial.println ("%") ;
+  Serial.print ("Exact Data Bit Rate ? ") ;
+  Serial.println (settings.exactDataBitRate () ? "yes" : "no") ;
+
+  //settings.mModuleMode = ACANFD_STM32_Settings::EXTERNAL_LOOP_BACK ;
+  settings.mModuleMode = ACANFD_STM32_Settings::NORMAL_FD ;
+
+  settings.mTxPin = PB_9 ; // DO NOT USE Pxy, Px_y
+  settings.mRxPin = PB_8 ; // DO NOT USE Pxy, Px_y
+  uint32_t errorCode = fdcan1.beginFD (settings) ;
+  if (0 == errorCode) {
+    Serial.println ("fdcan1 ok") ;
+  }else{
+    Serial.print ("Error can: 0x") ;
+    Serial.println (errorCode, HEX) ;
+    while (1) {
+      digitalWrite (LED_BUILTIN, !digitalRead (LED_BUILTIN)) ;
+      delay (50) ;
+    }
+  }
+  Serial.print ("Systick ") ;
+  Serial.println (SysTick->LOAD + 1) ;
+
+
+  setupFOC();
+
+  startFOC();
+}
+
+static bool ledState = false;
+
+uint32_t lastVelocitySendTime;
+void trySendVelocity() {
+  uint32_t currentTime = _micros();
+    // If it has been 4ms (250Hz)
+    if (currentTime - lastVelocitySendTime >= 4000) {
+      
+      uint8_t floatData[4]; // Stores a single float (4 bytes)
+
+      float shaftVel = motor.shaftVelocity();
+      float2bytesMSB(shaftVel, floatData);
+
+
+      CANFDMessage message ;
+      message.id = SHAFT_VEL_ADDR ;              // CAN id       
+      message.ext = false;              // false = Standard (11-bit) identifier (0x000 to 0x7FF), true = Extended (29-bit) identifier (0x00000000 to 0x1FFFFFFF)
+      message.type = CANFDMessage::CANFD_WITH_BIT_RATE_SWITCH;  // CAN FD with bit rate switch
+      //message.type = CANFDMessage::CANFD_NO_BIT_RATE_SWITCH;    // CAN FD with no bit rate switch (arbitration rate only)
+      //message.type = CANFDMessage::CAN_DATA;                    // Classic CAN data frame 
+      
+      message.len = 4 ;                 // Data length (0-64 bytes for CAN FD)  (0-8 bytes for classic CAN)
+      /*
+      (For CAN FD frames, valid lengths are: 0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64)
+      Use pad to fill with zeros
+      message.len = 21;  // Invalid length
+      message.pad();     // Now len = 24, bytes 21-23 are filled with 0x00
+      */
+
+      message.data[0] = floatData[0];
+      message.data[1] = floatData[1];
+      message.data[2] = floatData[2];
+      message.data[3] = floatData[3];
+      // message.data [0] = 0xbf;
+      // message.data [1] = 0x00;
+      // message.data [2] = 0x00;
+      // message.data [3] = 0x00;
+
+      const uint32_t sendStatus = fdcan1.tryToSendReturnStatusFD(message);
+      // if (sendStatus == 0) {
+      //   // digitalWrite (LED_BUILTIN, !digitalRead (LED_BUILTIN)) ;
+      //   //Serial.printf("Sent -> Shaft Velocity = %+.2f rad/s (%x %x %x %x) to -> 0x%X \n", shaftVel, message.data[0], message.data[1], message.data[2], message.data[3], message.id) ;
+      //   //Serial.println("sent");
+      // } else {
+      //   Serial.printf("Send failed with error: 0x%X\n", sendStatus);
+      // }
+
+      lastVelocitySendTime = currentTime;
+    }
+}
+
+uint32_t lastTelemetrySendTime; 
+void trySendTelemetry() {
+   uint32_t currentTime = _micros();
+    // If it has been 4ms (250Hz)
+    if (currentTime - lastVelocitySendTime >= 10'000'000) {
+
+      // CANFDMessage message ;
+      // message.id = SHAFT_TELE_ADDR ;   
+      // message.ext = false;              
+      // message.type = CANFDMessage::CANFD_WITH_BIT_RATE_SWITCH;  // CAN FD with bit rate switch
+      // //message.type = CANFDMessage::CANFD_NO_BIT_RATE_SWITCH;    // CAN FD with no bit rate switch (arbitration rate only)
+      // //message.type = CANFDMessage::CAN_DATA;                    // Classic CAN data frame 
+      
+      // message.len = 4 ;                 
+
+      // message.data[0] = floatData[0];
+      // message.data[1] = floatData[1];
+      // message.data[2] = floatData[2];
+      // message.data[3] = floatData[3];
+
+      // const uint32_t sendStatus = fdcan1.tryToSendReturnStatusFD(message);
+
+      lastVelocitySendTime = currentTime;
+    }
+}
+
+void loop() {
+
+  // --------------------------------------------------------- //
+  //                    DFU Reset Triggers                     //
+  // --------------------------------------------------------- //
+
+  // Trigger dfu mode if button pressed
+  if (digitalRead(USER_BTN) == LOW) {
+    rebootToDFU();
+  }
+
+  // Trigger dfu if "dfu" received from Serial
+  if (Serial.available()) {
+        String cmd = Serial.readStringUntil('\n');
+        cmd.trim();
+
+        if (cmd == "dfu") {
+            Serial.println("Entering DFU mode...");
+            delay(10);        // let USB send the message
+            rebootToDFU();
+        }
+    }
+
+  // --------------------------------------------------------- //
+  //                         SimpleFOC                         //
+  // --------------------------------------------------------- //
+
+  // Run the FOC loop commands
+  motor.loopFOC();
+  motor.move(target_current);
+
+  // --------------------------------------------------------- //
+  //                     Send CAN Messages                     //
+  // --------------------------------------------------------- //
+
+  // Send the telemetry at 0.1Hz (once every 10 seconds)
+  trySendTelemetry();
+
+  // Send the rotational velocity at 250Hz
+  trySendVelocity();
+
+  // --------------------------------------------------------- //
+  //                  Receive any CAN messages                 //
+  // --------------------------------------------------------- //
+
+  CANFDMessage messageFD ;
+  if (fdcan1.receiveFD0 (messageFD)) {
+    //gReceivedCount += 1 ;
+
+    //ledState = !ledState;
+    //digitalWrite(LED_BUILTIN, ledState);
+    
+    if (messageFD.id == CAN_ADDR) {
+        // TODO - Need to add validation, proper filtering, etc.
+        uint8_t received_float_data[4];
+
+        memcpy(received_float_data, messageFD.data, 4);
+
+        target_current = bytes2floatMSB(received_float_data);
+
+        //Serial.printf("Received -> Current = %+.4f A (%x %x %x %x) from -> 0x%X \n", target_current, received_float_data[0], received_float_data[1], received_float_data[2], received_float_data[3], messageFD.id);
+        Serial.print("Received");
+        constrain(target_current, -1, 1);
+
+        Serial.print("Target current: ");
+        Serial.print(target_current);
+        Serial.println("A");
+    }
+    // Serial.print ("fdcan1 received: ") ;
+    // Serial.println (gReceivedCount) ;
+  }
+
+  // --------------------------------------------------------- //
+  //                       End of Loop()                       //
+  // --------------------------------------------------------- //
+}
