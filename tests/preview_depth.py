@@ -3,7 +3,7 @@ import numpy as np
 import ArducamDepthCamera as ac
 
 # MAX_DISTANCE value modifiable  is 2000 or 4000
-MAX_DISTANCE=4000
+MAX_DISTANCE=2000
 
 class UserRect:
     def __init__(self) -> None:

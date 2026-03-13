@@ -54,6 +54,8 @@ async def start_foc() -> int:
     response = await bus.read_byte(I2C_ADDR, STM32DriverRegs.STARTFOC)
     return response
 
+async def send_watchdog_check():
+    await bus.write_byte(I2C_ADDR, STM32DriverRegs.CONN_WATCHDOG, 0x01)
 
 async def poll_loop():
     interval = 1.0 / POLL_RATE

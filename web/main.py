@@ -10,7 +10,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
-from control.drive import update_motor_currents
+from control.drive import update_motor_currents, send_watchdogs_checks
 import struct # for binary packing/unpacking
 
 app = FastAPI()
@@ -26,42 +26,45 @@ active_controller: WebSocket | None = None
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    global active_controller # variable inserted for user selection
+    global active_controller
     await websocket.accept()
     is_controller = active_controller is None
-    if is_controller: active_controller = websocket 
-    await websocket.send_text("control" if is_controller else "observe")  # ADD
+    if is_controller:
+        active_controller = websocket
+    await websocket.send_text("control" if is_controller else "observe")
     print("WebSocket connected")
+
     try:
         while True:
-            raw = await websocket.receive_bytes()
+            msg = await websocket.receive()
 
+            if msg.get("type") == "websocket.disconnect":
+                break  # clean exit, falls into finally
+
+            if "text" in msg:
+                if msg["text"] == "wd" and is_controller:
+                    await send_watchdogs_checks()
+                    # print("en")
+                continue
+
+            raw = msg.get("bytes", b"")
             if len(raw) != 8:
                 print("Unexpected binary length:", len(raw))
                 continue
 
-            # # '!ff' = network (big-endian), two 32-bit floats [web:58]
-            # v1, v2 = struct.unpack("!ff", raw)
+            if is_controller:
+                await update_motor_currents(raw[0:4], raw[4:8])
+                # print("senddata")
 
-            # v1 and v2 are Python floats in the original range, with float32 precision
-            # print(f"Received floats: slider1={v1}, slider2={v2}")
-
-            if is_controller: # if the active controller user
-                await update_motor_currents(raw[0:4],raw[4:8])
-                # print(f"Received floats: slider1={list(raw[0:4])}, slider2={list(raw[4:8])}")
-            
-        
-            # Echo back the same two float32 values
-            # reply = struct.pack("!ff", v1, v2)
-            # await websocket.send_bytes(reply)
     except WebSocketDisconnect:
-        
+        zero = struct.pack("!f", 0.0)
         print("WebSocket disconnected")
+        await update_motor_currents(list(zero), list(zero))
 
-    finally: # on intended or unintended disconnect
-        # Zero both motor velocities on disconnect
+    finally:
         zero = struct.pack("!f", 0.0)
         await update_motor_currents(list(zero), list(zero))
         print("Motors zeroed on Disconnect")
-        # Give up/release control
-        if is_controller: active_controller = None
+        if is_controller and active_controller is websocket:  # ← only release if still ours
+            active_controller = None
+

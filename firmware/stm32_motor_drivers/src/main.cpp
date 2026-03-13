@@ -12,6 +12,8 @@
 
 #include "i2c_register_map.h"
 
+#define CONN_WATCHDOG_TIMEOUT 1000
+
 #define POLE_PAIRS 7
 
 #define SPI1_SCK   PA5
@@ -60,6 +62,10 @@ float PSU_voltage = 12.0;
 char serialBuff[32];
 
 bool FOC_started = false;
+
+uint32_t lastConnWatchdogMsg;
+
+bool connectionWatchdog = HIGH;
 
 volatile uint8_t currentRegister = 0;
 volatile bool registerSet = false;
@@ -376,6 +382,11 @@ void loop() {
         }
     }
 
+    uint32_t currentTime = millis();
+    if (currentTime - lastConnWatchdogMsg > CONN_WATCHDOG_TIMEOUT) {
+      target_current = 0.0;
+    }
+
     // while (Serial.available() > 0) {
     //     // Clear the buffer
     //     memset(serialBuff, 0, sizeof(serialBuff) / sizeof(char));
@@ -414,6 +425,7 @@ void loop() {
   // --------------------------------------------------------- //
 
   // Run the FOC loop commands
+
   motor.loopFOC();
   motor.move(target_current);
   //motor.move();
@@ -465,6 +477,11 @@ void receiveEvent(int howMany) {
           Serial.println("Invalid value for STARTFOC. Use 0x01 to start.");
         }
         break;
+
+        case REG_CONN_WATCHDOG:
+          if (buffer[0] == 0x01) {
+            lastConnWatchdogMsg = millis();
+          }
     //   case REG_LED:
     //       digitalWrite(LED_BUILTIN, buffer[0]);
 
